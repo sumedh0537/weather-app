@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 const initialCoords = { lat: "", lon: "" };
 
@@ -9,6 +9,12 @@ const formatNumber = (value, digits = 1) => {
   return Number(value).toFixed(digits);
 };
 
+const formatLocationLabel = (item) => {
+  if (!item) return "";
+  const parts = [item.name, item.admin1, item.country].filter(Boolean);
+  return parts.join(", ");
+};
+
 export default function App() {
   const [mode, setMode] = useState("place");
   const [place, setPlace] = useState("");
@@ -17,6 +23,11 @@ export default function App() {
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
   const [queryMeta, setQueryMeta] = useState(null);
+  const [suggestions, setSuggestions] = useState([]);
+  const [isSuggesting, setIsSuggesting] = useState(false);
+  const [selectedSuggestion, setSelectedSuggestion] = useState(null);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const suggestionRef = useRef(null);
 
   const canSubmit = useMemo(() => {
     if (mode === "place") {
@@ -38,7 +49,70 @@ export default function App() {
   const handlePlaceChange = (event) => {
     resetStatus();
     setPlace(event.target.value);
+    setSelectedSuggestion(null);
+    setShowSuggestions(true);
   };
+
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (
+        suggestionRef.current &&
+        !suggestionRef.current.contains(event.target)
+      ) {
+        setShowSuggestions(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  useEffect(() => {
+    if (mode !== "place") {
+      setSuggestions([]);
+      setIsSuggesting(false);
+      return;
+    }
+
+    const query = place.trim();
+    if (query.length < 2) {
+      setSuggestions([]);
+      setIsSuggesting(false);
+      return;
+    }
+
+    if (showSuggestions) {
+      setIsSuggesting(true);
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const geocodeUrl = new URL(
+          "https://geocoding-api.open-meteo.com/v1/search"
+        );
+        geocodeUrl.searchParams.set("name", query);
+        geocodeUrl.searchParams.set("count", "5");
+        geocodeUrl.searchParams.set("language", "en");
+        geocodeUrl.searchParams.set("format", "json");
+
+        const response = await fetch(geocodeUrl.toString());
+        if (!response.ok) {
+          throw new Error("Suggestion lookup failed.");
+        }
+        const data = await response.json();
+        const nextSuggestions = (data?.results ?? []).map((item) => ({
+          ...item,
+          label: formatLocationLabel(item),
+        }));
+        setSuggestions(nextSuggestions);
+      } catch {
+        setSuggestions([]);
+      } finally {
+        setIsSuggesting(false);
+      }
+    }, 280);
+
+    return () => clearTimeout(timer);
+  }, [mode, place, showSuggestions]);
 
   const fetchWeather = async ({ latitude, longitude, label }) => {
     const weatherUrl = new URL("https://api.open-meteo.com/v1/forecast");
@@ -74,30 +148,38 @@ export default function App() {
 
     try {
       if (mode === "place") {
-        const geocodeUrl = new URL(
-          "https://geocoding-api.open-meteo.com/v1/search"
-        );
-        geocodeUrl.searchParams.set("name", place.trim());
-        geocodeUrl.searchParams.set("count", "1");
-        geocodeUrl.searchParams.set("language", "en");
-        geocodeUrl.searchParams.set("format", "json");
+        if (selectedSuggestion) {
+          await fetchWeather({
+            latitude: selectedSuggestion.latitude,
+            longitude: selectedSuggestion.longitude,
+            label: selectedSuggestion.label,
+          });
+        } else {
+          const geocodeUrl = new URL(
+            "https://geocoding-api.open-meteo.com/v1/search"
+          );
+          geocodeUrl.searchParams.set("name", place.trim());
+          geocodeUrl.searchParams.set("count", "1");
+          geocodeUrl.searchParams.set("language", "en");
+          geocodeUrl.searchParams.set("format", "json");
 
-        const geocodeResponse = await fetch(geocodeUrl.toString());
-        if (!geocodeResponse.ok) {
-          throw new Error("Location lookup failed. Try again.");
+          const geocodeResponse = await fetch(geocodeUrl.toString());
+          if (!geocodeResponse.ok) {
+            throw new Error("Location lookup failed. Try again.");
+          }
+          const geocodeData = await geocodeResponse.json();
+          const top = geocodeData?.results?.[0];
+
+          if (!top) {
+            throw new Error("No matching location found.");
+          }
+
+          await fetchWeather({
+            latitude: top.latitude,
+            longitude: top.longitude,
+            label: formatLocationLabel(top),
+          });
         }
-        const geocodeData = await geocodeResponse.json();
-        const top = geocodeData?.results?.[0];
-
-        if (!top) {
-          throw new Error("No matching location found.");
-        }
-
-        await fetchWeather({
-          latitude: top.latitude,
-          longitude: top.longitude,
-          label: `${top.name}, ${top.country}`,
-        });
       } else {
         await fetchWeather({
           latitude: coords.lat.trim(),
@@ -201,13 +283,53 @@ export default function App() {
                   <label className="text-sm font-medium text-slate-200">
                     Place name
                   </label>
-                  <input
-                    type="text"
-                    value={place}
-                    onChange={handlePlaceChange}
-                    placeholder="Goa, Mumbai, New York"
-                    className="w-full rounded-2xl border border-slate-700/80 bg-slate-950/60 px-4 py-3 text-base text-white outline-none transition focus:border-emerald-400"
-                  />
+                  <div className="relative" ref={suggestionRef}>
+                    <input
+                      type="text"
+                      value={place}
+                      onChange={handlePlaceChange}
+                      onFocus={() => setShowSuggestions(true)}
+                      onBlur={() => {
+                        setTimeout(() => setShowSuggestions(false), 120);
+                      }}
+                      placeholder="Goa, Mumbai, New York"
+                      className="w-full rounded-2xl border border-slate-700/80 bg-slate-950/60 px-4 py-3 text-base text-white outline-none transition focus:border-emerald-400"
+                    />
+                    {showSuggestions && place.trim().length > 1 ? (
+                      <div className="absolute left-0 right-0 top-full z-10 mt-2 overflow-hidden rounded-2xl border border-slate-800 bg-slate-950/95 shadow-glow">
+                        {isSuggesting ? (
+                          <div className="px-4 py-3 text-sm text-slate-400">
+                            Searching...
+                          </div>
+                        ) : suggestions.length > 0 ? (
+                          suggestions.map((item) => (
+                            <button
+                              key={`${item.id}-${item.latitude}-${item.longitude}`}
+                              type="button"
+                              onMouseDown={() => {
+                                setPlace(item.label);
+                                setSelectedSuggestion(item);
+                                setSuggestions([]);
+                                setShowSuggestions(false);
+                              }}
+                              className="flex w-full items-center justify-between gap-3 border-b border-slate-900/80 px-4 py-3 text-left text-sm text-slate-200 transition hover:bg-slate-900 last:border-none"
+                            >
+                              <span className="font-medium text-white">
+                                {item.name}
+                              </span>
+                              <span className="text-xs uppercase tracking-[0.3em] text-emerald-300">
+                                {item.country}
+                              </span>
+                            </button>
+                          ))
+                        ) : (
+                          <div className="px-4 py-3 text-sm text-slate-400">
+                            No matches found.
+                          </div>
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
               ) : (
                 <div className="grid gap-4 md:grid-cols-2">
